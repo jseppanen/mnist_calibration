@@ -1,0 +1,14 @@
+
+channels:
+- pytorch
+- conda-forge
+
+dependencies:
+- python=3.8
+- pytorch=1.9
+- torchvision=0.10
+- ipython=7.27
+- optuna=2.9
+
+- pip: 
+  - uncertainty-calibration==0.0.9
