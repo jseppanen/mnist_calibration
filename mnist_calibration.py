@@ -1,5 +1,6 @@
 import math
 import random
+import warnings
 from functools import partial
 from typing import Dict
 
@@ -13,6 +14,7 @@ from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader, Subset
 from torchvision import transforms
 from torchvision.datasets import MNIST
+from scipy.optimize import minimize_scalar
 
 
 class ConvNet(nn.Module):
@@ -24,7 +26,6 @@ class ConvNet(nn.Module):
         self.dropout2 = nn.Dropout(0.5)
         self.fc1 = nn.Linear(9216, 128)
         self.fc2 = nn.Linear(128, 10)
-        self.temperature = 1.0
 
     def forward(self, x) -> Tensor:
         x = self.conv1(x)
@@ -38,17 +39,16 @@ class ConvNet(nn.Module):
         x = F.relu(x)
         x = self.dropout2(x)
         x = self.fc2(x)
-        x = x / self.temperature
-        output = F.log_softmax(x, dim=1)
-        return output
+        return x
 
 
 def train_epoch(model, train_loader, optimizer, scheduler, loss_fn) -> None:
     model.train()
     for data, target in train_loader:
         optimizer.zero_grad()
-        output = model(data)
-        loss = loss_fn(output, target)
+        logit = model(data)
+        logprob = F.log_softmax(logit, dim=1)
+        loss = loss_fn(logprob, target)
         loss.backward()
         optimizer.step()
         scheduler.step()
@@ -67,17 +67,35 @@ def evaluate(model, test_loader) -> Dict[str, float]:
     outputs = torch.cat(outputs)
     targets = torch.cat(targets)
 
-    log_loss = F.nll_loss(outputs, targets)
+    logprobs = F.log_softmax(outputs, dim=1)
+    log_loss = F.nll_loss(logprobs, targets)
     accuracy = (outputs.argmax(dim=1) == targets).float().mean().item()
-    calibration_error = cal.get_calibration_error(outputs, targets)
-    ece = cal.get_ece(outputs, targets)
+
+    def temperature_error(log_temperature):
+        temperature = math.exp(log_temperature)
+        probs = F.softmax(outputs / temperature, dim=1)
+        calibration_error = cal.get_calibration_error(probs, targets)
+        if math.isnan(calibration_error):
+            calibration_error = 9.0
+        return calibration_error
+
+    res = minimize_scalar(temperature_error)
+    if res.success:
+        temperature = math.exp(res.x)
+    else:
+        warnings.warn("temperature scaling search didn't converge")
+        temperature = 1.0
+    probs = F.softmax(outputs / temperature, dim=1)
+    calibration_error = cal.get_calibration_error(probs, targets)
+    ece = cal.get_ece(probs, targets)
 
     print(
         f"\n"
         f"Log loss: {log_loss:.4f}, "
         f"Accuracy: {100 * accuracy:.0f}%, "
-        f"ECE: {ece:.2f}, "
-        f"Calibration error: {calibration_error:.2f}"
+        f"Temperature: {temperature:.3f}, "
+        f"ECE: {ece:.4f}, "
+        f"Calibration error: {calibration_error:.4f}"
         f"\n"
     )
 
@@ -86,6 +104,7 @@ def evaluate(model, test_loader) -> Dict[str, float]:
         "log_loss": log_loss,
         "calibration_error": calibration_error,
         "ece": ece,
+        "temperature": temperature,
     }
 
 
@@ -130,7 +149,6 @@ def objective(trial) -> float:
     batch_size = 2 ** trial.suggest_int("log2_batch_size", 5, 11)
     learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-1, log=True)
     weight_decay = trial.suggest_float("weight_decay", 1e-6, 1.0, log=True)
-    temperature = trial.suggest_float("temperature", 1e-3, 1e3, log=True)
 
     loss_name = trial.suggest_categorical(
         "loss_function", ["focal_loss", "nll_loss_with_label_smoothing"]
@@ -159,17 +177,15 @@ def objective(trial) -> float:
     optimizer = Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = OneCycleLR(optimizer, max_lr=learning_rate, total_steps=total_steps)
     train_epoch(model, train_loader, optimizer, scheduler, loss_fn=loss_fn)
-
-    # temperature scaling is done at inference time
-    model.temperature = temperature
     metrics = evaluate(model, eval_loader)
+    trial.set_user_attr("temperature", metrics["temperature"])
 
     # optimize calibration error but not at the expense of classification accuracy
     combined = -math.log(metrics["accuracy"]) + metrics["calibration_error"]
 
     # even though Optuna detects NaN's, the hyperparameter search sometimes gets stuck
     if math.isnan(combined):
-        combined = 999.0
+        combined = 9.0
     return combined
 
 

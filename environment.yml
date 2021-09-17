@@ -9,6 +9,7 @@ dependencies:
 - torchvision=0.10
 - ipython=7.27
 - optuna=2.9
+- scipy=1.7
 
 - pip: 
   - uncertainty-calibration==0.0.9
