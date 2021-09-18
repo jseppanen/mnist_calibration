@@ -117,7 +117,7 @@ def nll_loss_with_label_smoothing(
     return loss.mean()
 
 
-def focal_loss(logprob: Tensor, target: Tensor, *, gamma: float = 0.0) -> Tensor:
+def focal_loss(logprob: Tensor, target: Tensor, *, gamma: float = 1.0) -> Tensor:
     logprob = logprob.gather(dim=-1, index=target.unsqueeze(1)).squeeze(1)
     loss = -(1 - logprob.exp()).pow(gamma) * logprob
     return loss.mean()
@@ -160,7 +160,7 @@ def objective(trial) -> float:
         )
     elif loss_name == "focal_loss":
         loss_fn = partial(
-            focal_loss, gamma=trial.suggest_float("focal_loss_gamma", 0.0, 10.0)
+            focal_loss, gamma=trial.suggest_float("focal_loss_gamma", 1.0, 10.0)
         )
     else:
         raise ValueError(f"unknown loss: {loss_name}")
